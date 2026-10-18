@@ -1,0 +1,25 @@
+{
+  "repos": [
+    {
+      "name": "pokemon-dex-ai",
+      "path": "D:\\xsolla\\pokemon-dex-ai",
+      "desc": "宝可梦图鉴 AI 站(已部署 vercel):单轮 Function Calling 工具调用循环、LLM 预算熔断与降级、CI 挡板"
+    },
+    {
+      "name": "game-ai-journey",
+      "path": "D:\\game-ai-journey",
+      "desc": "学习日志仓库:learning-progress.md 按 Session 记录课程、知识点与复盘"
+    },
+    {
+      "name": "learning-log-qa",
+      "path": "D:\\learning-log-qa",
+      "desc": "学习日志 RAG 问答:切块/嵌入/检索/流式问答/评测集"
+    },
+    {
+      "name": "skin-shop",
+      "path": "D:\\xsolla\\skin-shop",
+      "desc": "电商后端:闪购+SLO、退款 Saga、RabbitMQ、OTel、GitLab CI、HPA、checkout 幂等"
+    }
+  ],
+  "rubric": "周报草稿必须按以下结构撰写:\n1. 文首「材料来源清单」:列出引用了哪些仓库(git log 的时间范围)与哪些文件,让 reviewer 能逐条核对;\n2. 「本周提交」:按 功能 / 修复 / 文档 / 其他 归类,每条格式 `- <仓库名>: <hash> <提交标题>`;\n3. 「学习与沉淀」:必须通过 read_file 实际读取学习日志类文件(如 game-ai-journey/learning-progress.md 的最新章节)后提炼,禁止从仓库描述(list_repos 的 desc)推测或罗列关键词;确实无材料就写「本周学习日志无新增」;\n4. 「未竟事项」:进行中、未完成、以及材料缺口的如实说明;\n5. 「下周计划」:基于未竟事项给出 2-4 条具体建议。\n语言:简体中文。事实纪律:hash、日期、数字必须来自工具返回,禁止编造;某个仓库没有材料就如实写「无记录」。"
+}

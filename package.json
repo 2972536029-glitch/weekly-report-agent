@@ -1,0 +1,19 @@
+{
+  "name": "weekly-report-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "周报 Agent:给定目标自主规划、调用本地工具收集材料,产出周报草稿停在用户面前等 review",
+  "scripts": {
+    "weekly": "tsx src/cli.ts",
+    "review": "tsx src/cli.ts --review",
+    "e2e": "tsx qa/e2e.mjs",
+    "check-hash": "node qa/check-hash.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
