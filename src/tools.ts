@@ -80,7 +80,21 @@ function gitLog(ctx: ToolContext): ToolDef {
         const truncated = all.length > GIT_LOG_LIMIT;
         const lines = truncated ? all.slice(0, GIT_LOG_LIMIT) : all;
         const note = truncated ? `\n(已达 ${GIT_LOG_LIMIT} 条上限,已截断;完整列表请自行缩小 since 范围)` : '';
-        return { ok: true, data: `${repo} 自 ${since} 以来 ${all.length} 条提交:\n${lines.join('\n')}${note}` };
+        // 变更量统计(同上限累计):给模型可引用的真实数字(文件数/增删行数);
+        // 统计失败降级省略——周报少了数字还能写,gith 不该因此失败
+        let statsNote = '';
+        try {
+          const { stdout: st } = await execFileP('git', [
+            '-C', def.path, '-c', 'core.quotepath=false',
+            'log', `--since=${since}`, `--max-count=${GIT_LOG_LIMIT}`, '--shortstat', '--pretty=format:',
+          ], { timeout: 15_000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' });
+          let files = 0, ins = 0, del = 0;
+          for (const m of st.matchAll(/(\d+) files? changed/g)) files += Number(m[1]);
+          for (const m of st.matchAll(/(\d+) insertions?\(\+\)/g)) ins += Number(m[1]);
+          for (const m of st.matchAll(/(\d+) deletions?\(-\)/g)) del += Number(m[1]);
+          if (files + ins + del > 0) statsNote = `\n变更量(与上列表同上限累计):${files} 文件变更,+${ins}/-${del}`;
+        } catch { /* 统计不可用:省略 */ }
+        return { ok: true, data: `${repo} 自 ${since} 以来 ${all.length} 条提交:\n${lines.join('\n')}${note}${statsNote}` };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { ok: false, error: `git_log(${repo}) 失败:${msg.slice(0, 300)}`, hint: '该路径可能不是 git 仓库;可跳过此仓库继续' };

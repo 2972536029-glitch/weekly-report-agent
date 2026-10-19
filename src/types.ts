@@ -30,6 +30,8 @@ export interface LlmMessage {
 export interface ChatResponse {
   text: string;
   toolCalls: ToolCallRequest[];
+  /** 模型回报的真实用量(GLM 非流式恒带);缺失时由 agent 用字符/2 估算兜底 */
+  usage?: { prompt: number; completion: number };
 }
 
 // ---- 工具契约 ---------------------------------------------------------------

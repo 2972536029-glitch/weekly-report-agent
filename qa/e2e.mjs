@@ -11,6 +11,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildTools, isoWeek, READ_FILE_MAX } from '../src/tools.ts';
 import { runWeeklyAgent } from '../src/agent.ts';
+import { knownHashes, verifyDraftHashes } from '../src/verify.ts';
+import { acceptDraft } from '../src/reports.ts';
 
 let pass = 0, fail = 0;
 const assert = (cond, name, extra = '') => {
@@ -68,6 +70,7 @@ const tool = name => tools.find(t => t.name === name);
   assert(r.data.includes('初始提交 功能说明'), 'git_log 中文标题不乱码', r.data.slice(0, 300));
   const lines = r.data.split('\n').filter(l => /^[0-9a-f]{7}\t/.test(l));
   assert(lines.length === 3 && lines.every(l => /^[0-9a-f]{7}\t\d{4}-\d{2}-\d{2}\t/.test(l)), 'git_log 行格式 hash<TAB>日期<TAB>标题');
+  assert(r.data.includes('变更量(与上列表同上限累计):3 文件变更,+3/-0'), 'git_log 附聚合变更量统计(shortstat)', r.data.slice(-120));
 }
 {
   const r = await tool('git_log').execute({ repo: 'fixture', since: '2050-01-01' });
@@ -123,7 +126,7 @@ const tool = name => tools.find(t => t.name === name);
 }
 
 // ---- fake 模型 ---------------------------------------------------------------
-// steps:每步 {text, toolCalls} 或 (messages) => step。chat 记录收到的 messages 供断言。
+// steps:每步 {text, toolCalls, usage?} 或 (messages) => step。chat 记录收到的 messages 供断言。
 function fakeModel(steps) {
   let i = 0;
   const received = [];
@@ -246,6 +249,119 @@ const auditLines = dir => readFileSync(dir, 'utf8').trim().split('\n').map(l => 
     paths: { draftsDir: join(tmp, 'drafts'), auditDir: join(tmp, 'audit') },
   });
   assert(result.status === 'no_draft' && result.rounds === 4, `主循环 2 轮 + 收尾 2 轮后如实报 no_draft(实际 ${result.rounds})`, JSON.stringify(result).slice(0, 150));
+}
+
+// ---- 9. token 计量:audit 记录每轮 usage 与累计 ------------------------------
+{
+  const md = '# 周报\n\n' + '内容'.repeat(30);
+  const model = fakeModel([
+    { text: '', toolCalls: [call('save_draft', { title: '计量测试', md })], usage: { prompt: 1200, completion: 80 } },
+  ]);
+  const result = await runWeeklyAgent({
+    config: testConfig, model, since: '1 day ago', maxRounds: 8,
+    paths: { draftsDir: join(tmp, 'drafts'), auditDir: join(tmp, 'audit') },
+  });
+  assert(result.status === 'draft_saved' && result.tokensUsed === 1280, '真值 usage 计入 tokensUsed', JSON.stringify(result.tokensUsed));
+  const { readdirSync: rd } = await import('node:fs');
+  const newest = rd(join(tmp, 'audit')).filter(f => f.endsWith('.jsonl')).sort().pop();
+  const lines = auditLines(join(tmp, 'audit', newest));
+  const round1 = lines.find(l => l.type === 'model_round');
+  assert(round1?.usage?.cumulative === 1280 && round1?.usage?.prompt === 1200, '审计记录每轮 usage 与累计');
+  assert(lines.some(l => l.type === 'run_end' && l.tokens_used === 1280), 'run_end 记录 tokens_used');
+  // 缺 usage 时估算兜底(chars/2)
+  const model2 = fakeModel([{ text: 'x'.repeat(100), toolCalls: [call('save_draft', { title: '估算测试', md })] }]);
+  const r2 = await runWeeklyAgent({
+    config: testConfig, model: model2, since: '1 day ago', maxRounds: 8,
+    paths: { draftsDir: join(tmp, 'drafts'), auditDir: join(tmp, 'audit') },
+  });
+  assert(r2.tokensUsed !== undefined && r2.tokensUsed > 0, 'usage 缺失时按字符/2 估算兜底', String(r2.tokensUsed));
+}
+
+// ---- 10. token 预算触顶 → 强制收尾(降级带 reason,不静默) ------------------
+{
+  const md = '# 周报(token 触顶)\n\n' + '内容'.repeat(30);
+  const model = fakeModel([
+    (messages) => {
+      const closing = messages.some(m => m.role === 'user' && (m.content ?? '').includes('token 预算已达上限'));
+      if (closing) return { text: '', toolCalls: [call('save_draft', { title: '预算触顶收尾', md })] };
+      return { text: '', toolCalls: [call('git_log', { repo: 'fixture', since: '1 day ago' })], usage: { prompt: 9000, completion: 100 } };
+    },
+  ]);
+  const result = await runWeeklyAgent({
+    config: testConfig, model, since: '1 day ago', maxRounds: 8, tokenBudget: 10000,
+    paths: { draftsDir: join(tmp, 'drafts'), auditDir: join(tmp, 'audit') },
+  });
+  assert(result.status === 'draft_saved' && result.budgetExceeded === true, 'token 预算触顶强制收尾并保存', JSON.stringify(result).slice(0, 150));
+  assert(result.tokensUsed !== undefined && result.tokensUsed > 10000, '触顶后累计 token 超出预算值');
+  const { readdirSync: rd2 } = await import('node:fs');
+  const newest = rd2(join(tmp, 'audit')).filter(f => f.endsWith('.jsonl')).sort().pop();
+  const lines = auditLines(join(tmp, 'audit', newest));
+  assert(lines.some(l => l.type === 'run_end' && l.budget_exceeded === true), 'run_end 记录 budget_exceeded');
+}
+
+// ---- 11. 收尾模式工具白名单:收集类调用被代码拒绝,原因回给模型 -----------
+{
+  const md = '# 周报(守卫)\n\n' + '内容'.repeat(30);
+  let closingCalls = 0;
+  const model = fakeModel([
+    (messages) => {
+      const closing = messages.some(m => m.role === 'user' && (m.content ?? '').includes('轮次已达上限'));
+      if (!closing) return { text: '', toolCalls: [call('git_log', { repo: 'fixture', since: '1 day ago' })] };
+      closingCalls++;
+      if (closingCalls === 1) return { text: '', toolCalls: [call('git_log', { repo: 'fixture', since: '1 day ago' })] }; // 收尾期违规收集 → 应被拒
+      return { text: '', toolCalls: [call('save_draft', { title: '守卫测试', md })] };
+    },
+  ]);
+  const result = await runWeeklyAgent({
+    config: testConfig, model, since: '1 day ago', maxRounds: 2,
+    paths: { draftsDir: join(tmp, 'drafts'), auditDir: join(tmp, 'audit') },
+  });
+  assert(result.status === 'draft_saved', '守卫拒绝违规收集后仍正常收尾', JSON.stringify(result).slice(0, 150));
+  // 拒绝结果出现在最后一次 chat(收尾第二轮 save_draft 前)收到的 messages 里
+  const lastMsgs = model.received[model.received.length - 1] ?? [];
+  const refused = lastMsgs.filter(m => m.role === 'tool').pop();
+  assert(refused && (refused.content ?? '').includes('收尾模式'), '违规收集被代码白名单拒绝且原因回给模型', JSON.stringify(refused).slice(0, 150));
+  const { readdirSync: rd3 } = await import('node:fs');
+  const newest = rd3(join(tmp, 'audit')).filter(f => f.endsWith('.jsonl')).sort().pop();
+  const lines = auditLines(join(tmp, 'audit', newest));
+  assert(lines.some(l => l.type === 'tool_result' && l.closing === true && l.ok === false), '审计记录收尾期的拒绝');
+}
+
+// ---- 12. verify 核心 + accept 门禁 -------------------------------------------
+{
+  const known = knownHashes(testConfig);
+  assert(known.has(hashes[0]), 'knownHashes 含 fixture 真实 hash');
+  const chkGood = verifyDraftHashes(`- fixture: ${hashes[0]} 提交一\n- fixture: ${hashes[1]} 提交二\n`, known);
+  assert(chkGood.total === 2 && chkGood.real === 2 && chkGood.bad.length === 0, 'verifyDraftHashes 全真通过');
+  const chkBad = verifyDraftHashes(`- fixture: ${hashes[0]}\n- fixture: ffffaaa 编造\n`, known);
+  assert(chkBad.total === 2 && chkBad.real === 1 && chkBad.bad[0] === 'ffffaaa', 'verifyDraftHashes 抓出编造 hash');
+  const chkZero = verifyDraftHashes('本周无提交', known);
+  assert(chkZero.total === 0 && chkZero.bad.length === 0, '零 hash 草稿不误伤');
+
+  const reportsDir = join(tmp, 'reports');
+  const goodDraft = join(tmp, 'drafts', 'accept-good.md');
+  writeFileSync(goodDraft, `# 周报\n\n- fixture: ${hashes[0]} 初始提交\n`, 'utf8');
+  const acc = acceptDraft(goodDraft, testConfig, reportsDir);
+  assert(acc.ok && acc.reportPath?.startsWith(reportsDir), 'acceptDraft 真实 hash 通过门禁并移入 reports/', JSON.stringify(acc));
+  assert(!existsSync(goodDraft) && existsSync(acc.reportPath), 'accept 后草稿已不在 drafts,reports 有终稿');
+  const indexText = readFileSync(join(reportsDir, 'index.md'), 'utf8');
+  assert(indexText.includes('accept-good.md') && indexText.includes('hash 1/1 真实'), 'index.md 记录收录条目');
+
+  const badDraft = join(tmp, 'drafts', 'accept-bad.md');
+  writeFileSync(badDraft, `# 周报\n\n- fixture: ffffaaa 编造\n`, 'utf8');
+  const rej = acceptDraft(badDraft, testConfig, reportsDir);
+  assert(rej.ok === false && (rej.message ?? '').includes('ffffaaa'), 'acceptDraft 编造 hash 拒绝收录', JSON.stringify(rej));
+  assert(existsSync(badDraft), '被拒草稿留在 drafts/ 等人修');
+  const idxAfter = readFileSync(join(reportsDir, 'index.md'), 'utf8');
+  assert(!idxAfter.includes('accept-bad'), '被拒草稿不进 index.md');
+
+  const zeroDraft = join(tmp, 'drafts', 'accept-zero.md');
+  writeFileSync(zeroDraft, '# 空周\n\n本周无提交。\n', 'utf8');
+  const accZero = acceptDraft(zeroDraft, testConfig, reportsDir);
+  assert(accZero.ok, '零 hash 草稿(合法形态)放行收录');
+
+  const miss = acceptDraft(join(tmp, 'drafts', 'nope.md'), testConfig, reportsDir);
+  assert(miss.ok === false && (miss.message ?? '').includes('不存在'), 'acceptDraft 不存在的草稿报错');
 }
 
 // ---- 清理 --------------------------------------------------------------------

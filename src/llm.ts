@@ -35,6 +35,15 @@ interface ChatCompletionJson {
     };
     finish_reason?: string;
   }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+}
+
+/** token 估算:GLM 中文≈1字/token、英文≈4字符/token,混合语料取字符/2。
+ *  这是"量级护栏"口径,不是计费账单——真值优先(GLM usage),缺失才用它兜底。 */
+export function estimateTokens(...texts: string[]): number {
+  let chars = 0;
+  for (const t of texts) chars += t?.length ?? 0;
+  return Math.ceil(chars / 2);
 }
 
 export function createGlmModel(): ChatModel {
@@ -71,12 +80,16 @@ export function createGlmModel(): ChatModel {
           const json = (await res.json()) as ChatCompletionJson;
           const choice = json.choices?.[0];
           const msg = choice?.message;
+          const usage = json.usage && typeof json.usage.prompt_tokens === 'number'
+            ? { prompt: json.usage.prompt_tokens, completion: json.usage.completion_tokens ?? 0 }
+            : undefined;
           return {
             text: typeof msg?.content === 'string' ? msg.content : '',
             toolCalls: (msg?.tool_calls ?? []).map(c => ({
               id: c.id,
               function: { name: c.function.name, arguments: c.function.arguments },
             })),
+            usage,
           };
         } catch (err) {
           if (!isTransient(err) || attempt === MAX_ATTEMPTS - 1) throw err;

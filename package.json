@@ -7,8 +7,10 @@
   "scripts": {
     "weekly": "tsx src/cli.ts",
     "review": "tsx src/cli.ts --review",
+    "accept": "tsx src/cli.ts --accept",
+    "history": "tsx src/cli.ts --history",
     "e2e": "tsx qa/e2e.mjs",
-    "check-hash": "node qa/check-hash.mjs",
+    "check-hash": "tsx qa/check-hash.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
